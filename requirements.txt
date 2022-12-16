@@ -1,0 +1,5 @@
+torch
+torchmetrics
+fastpreogress
+wandb
+timm
