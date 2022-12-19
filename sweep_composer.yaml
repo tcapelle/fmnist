@@ -1,0 +1,41 @@
+program: train_composer.py
+name: resnet26d
+entity: fastai
+project: fmnist
+
+method: random
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+
+parameters:
+    lr:
+        distribution: log_uniform_values
+        min: 1e-3
+        max: 1e-2
+    model_name:
+        values: [
+            # 'resnet10t',
+            # 'resnet14t',
+            # 'convnext_nano',
+            'resnet26d',
+            ]
+    use_randaug:
+        values: [true, false]
+    use_smoothing:
+        values: [true, false]
+    use_mixup:
+        values: [true, false]
+    use_cutmix:
+        values: [true, false]
+    use_ema:
+        values: [true, false]
+    use_blur:
+        values: [true, false]
+    seed: 
+        values: [1,2,3]
+    optim:
+        values: ["sgd", "adam", "amsgrad"]
+

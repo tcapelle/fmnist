@@ -1,0 +1,23 @@
+program: train.py
+entity: fastai
+project: fmnist
+method: random
+parameters:
+    lr:
+        distribution: log_uniform_values
+        min: 1e-4
+        max: 1e-2
+    bs:
+      values: [64, 128, 256, 512]
+    model_name:
+        values: [
+            'convnext_nano',
+            'convnext_tiny',
+            'resnet18',
+            'resnet18d',
+            'resnet26d',
+            'resnet34d',
+            ]
+    seed: 
+        values: [1,2,3]
+

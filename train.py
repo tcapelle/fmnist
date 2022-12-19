@@ -35,7 +35,8 @@ config = SimpleNamespace(
     model_name="convnext_nano", 
     bs=128,
     device="cuda",
-    seed=42)
+    seed=42,
+    lr=1e-3)
 
 def parse_args(config):
     parser = argparse.ArgumentParser(description='Run training baseline')
@@ -44,6 +45,7 @@ def parse_args(config):
     parser.add_argument('--device', type=str, default=config.device, help='device')
     parser.add_argument('--seed', type=int, default=config.seed, help='random seed')
     parser.add_argument('--bs', type=int, default=config.bs, help='batch size')
+    parser.add_argument('--lr', type=float, default=config.lr, help='learning_rate')
     args = vars(parser.parse_args())
     
     # update config with parsed args
@@ -158,7 +160,7 @@ class ImageModel:
             _  = self.one_epoch(train=True, use_wandb=use_wandb)
             
             if use_wandb:
-                wandb.log({"epoch":epoch})
+                wandb.log({"epoch":epoch+1})
                 
             ## validation
             if self.do_validation:
@@ -176,6 +178,6 @@ if __name__=="__main__":
     
     set_seed(config.seed)
     
-    model = ImageModel()
-    model.compile(epochs=20, lr=1e-3)
+    model = ImageModel(model_name=config.model_name)
+    model.compile(epochs=20, lr=config.lr)
     model.fit(use_wandb=True)
