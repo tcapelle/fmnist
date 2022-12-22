@@ -30,13 +30,26 @@ def set_seed(s, reproducible=False):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
+def to_device(t, device):
+    if isinstance(t, (tuple, list)):
+        return [_t.to(device) for _t in t]
+    elif isinstance(t, torch.Tensor):
+        return t.to(device)
+    else:
+        raise("Not a Tensor or list of Tensors")
+    return t    
+        
+WANDB_PROJECT = "fmnist_bench"
+WANDB_ENTITY = "capecape"
+        
 config = SimpleNamespace(
     epochs=20, 
-    model_name="convnext_nano", 
-    bs=128,
+    model_name="resnet10t", 
+    bs=256,
     device="cuda",
     seed=42,
-    lr=1e-3)
+    lr=1e-3,
+    wd=1e-3)
 
 def parse_args(config):
     parser = argparse.ArgumentParser(description='Run training baseline')
@@ -53,27 +66,23 @@ def parse_args(config):
         setattr(config, k, v)
 
 train_tfms = T.Compose([
-    T.Resize((32, 32)), 
-    T.RandAugment(num_ops=3),
-    T.ToTensor()])
+    T.RandomCrop(28, padding=4), 
+    T.RandomHorizontalFlip(),
+    T.ToTensor(),
+    T.Normalize((0.1307,), (0.3081,)),
+])
 
 val_tfms = T.Compose([
-    T.Resize((32,32)),
-    T.ToTensor()])
+    T.ToTensor(),
+    T.Normalize((0.1307,), (0.3081,)),
+])
 
 tfms ={"train": train_tfms, "valid":val_tfms}
 
-def to_device(t, device):
-    if isinstance(t, (tuple, list)):
-        return [_t.to(device) for _t in t]
-    elif isinstance(t, torch.Tensor):
-        return t.to(device)
-    else:
-        raise("Not a Tensor or list of Tensors")
-    return t     
+ 
 
 class ImageModel:
-    def __init__(self, data_path=".", tfms=tfms, model_name="convnext_nano", device="cuda"):
+    def __init__(self, data_path=".", tfms=tfms, model_name="resnet10t", device="cuda"):
         
         self.device = device
         self.config = SimpleNamespace(model_name=model_name, device=device)
@@ -94,7 +103,7 @@ class ImageModel:
                  
         
     
-    def dataloaders(self, bs=128, num_workers=8):
+    def dataloaders(self, bs=256, num_workers=8):
         self.config.bs = bs
         self.num_workers = num_workers
         self.train_dataloader = DataLoader(self.train_ds, batch_size=bs, shuffle=True, 
@@ -154,7 +163,7 @@ class ImageModel:
     
     def fit(self, use_wandb=False):
         if use_wandb:
-            run = wandb.init(project="fmnist_pytorch", entity="fastai", config=self.config)
+            run = wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY, config=self.config)
             
         for epoch in progress_bar(range(self.config.epochs), total=self.config.epochs, leave=True):
             _  = self.one_epoch(train=True, use_wandb=use_wandb)
@@ -179,5 +188,5 @@ if __name__=="__main__":
     set_seed(config.seed)
     
     model = ImageModel(model_name=config.model_name)
-    model.compile(epochs=20, lr=config.lr)
+    model.compile(epochs=20, lr=config.lr, wd=config.wd)
     model.fit(use_wandb=True)
