@@ -162,8 +162,8 @@ class ImageModel:
             
         return avg_loss.mean().item(), acc
     
-    def print_metrics(epoch, train_loss, val_loss):
-        print(f"epoch: {epoch}, train_loss: {train_loss}, train_acc: {self.train_acc.compute()} | val_loss: {val_loss}, val_acc: {self.valid_acc.compute()}")
+    def print_metrics(self, epoch, train_loss, val_loss):
+        print(f"epoch: {epoch:3}, train_loss: {train_loss:10.2f}, train_acc: {self.train_acc.compute():3.2f}   ||   val_loss: {val_loss:10.2f}, val_acc: {self.valid_acc.compute():3.2f}")
     
     def fit(self, use_wandb=False):
         if use_wandb:
