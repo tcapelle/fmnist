@@ -143,10 +143,11 @@ class ImageModel:
             dl = self.valid_dataloader
         pbar = progress_bar(dl, leave=False)
         for i, b in enumerate(pbar):
-            with torch.autocast("cuda") and (torch.inference_mode() if not train else torch.enable_grad()):
+            with (torch.inference_mode() if not train else torch.enable_grad()):
                 images, labels = to_device(b, self.device)
-                preds = self.model(images)
-                loss = self.loss_func(preds, labels)
+                with torch.autocast("cuda"):
+                    preds = self.model(images)
+                    loss = self.loss_func(preds, labels)
                 avg_loss += loss
                 if train:
                     self.train_step(loss)
@@ -161,22 +162,26 @@ class ImageModel:
             
         return avg_loss.mean().item(), acc
     
+    def print_metrics(epoch, train_loss, val_loss):
+        print(f"epoch: {epoch}, train_loss: {train_loss}, train_acc: {self.train_acc.compute()} | val_loss: {val_loss}, val_acc: {self.valid_acc.compute()}")
+    
     def fit(self, use_wandb=False):
         if use_wandb:
             run = wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY, config=self.config)
             
         for epoch in progress_bar(range(self.config.epochs), total=self.config.epochs, leave=True):
-            _  = self.one_epoch(train=True, use_wandb=use_wandb)
+            train_loss, _ = self.one_epoch(train=True, use_wandb=use_wandb)
             
             if use_wandb:
                 wandb.log({"epoch":epoch+1})
                 
             ## validation
             if self.do_validation:
-                avg_loss, acc = self.one_epoch(train=False, use_wandb=use_wandb)
+                val_loss, _ = self.one_epoch(train=False, use_wandb=use_wandb)
                 if use_wandb:
-                    wandb.log({"val_loss": avg_loss,
+                    wandb.log({"val_loss": val_loss,
                                "val_acc": self.valid_acc.compute()})
+            self.print_metrics(epoch, train_loss, val_loss)
             self.reset()
         if use_wandb:
             wandb.finish()
