@@ -50,7 +50,6 @@ train_tfms = T.Compose([
     T.Normalize((0.1307,), (0.3081,)),
 ])
 val_tfms = T.Compose([
-    # T.Resize((32,32)),
     T.ToTensor(),
     T.Normalize((0.1307,), (0.3081,)),
 ])

@@ -1,5 +1,6 @@
 torch
-torchmetrics
+torcheval
+fastcore
 fastpreogress
 wandb
 timm

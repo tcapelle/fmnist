@@ -8,13 +8,15 @@ import torchvision.transforms as T
 
 from fastprogress import progress_bar
 
-from torchmetrics import Accuracy
+from torcheval.metrics import MulticlassAccuracy, Mean
 
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
+
+from preds_logger import PredsLogger
 
 
 def set_seed(s, reproducible=False):
@@ -45,11 +47,11 @@ WANDB_ENTITY = "capecape"
 config = SimpleNamespace(
     epochs=20, 
     model_name="resnet10t", 
-    bs=256,
+    bs=512,
     device="cuda",
     seed=42,
-    lr=1e-3,
-    wd=1e-3)
+    lr=1e-2,
+    wd=0.)
 
 def parse_args(config):
     parser = argparse.ArgumentParser(description='Run training baseline')
@@ -65,66 +67,86 @@ def parse_args(config):
     for k, v in args.items():
         setattr(config, k, v)
 
+        
+mean, std = (0.28, 0.35)
+        
 train_tfms = T.Compose([
-    T.RandomCrop(28, padding=4), 
+    T.RandomCrop(28, padding=1), 
     T.RandomHorizontalFlip(),
     T.ToTensor(),
-    T.Normalize((0.1307,), (0.3081,)),
+    T.Normalize(mean, std),
+    T.RandomErasing(scale=(0.02, 0.25), value="random"),
 ])
 
 val_tfms = T.Compose([
     T.ToTensor(),
-    T.Normalize((0.1307,), (0.3081,)),
+    T.Normalize(mean, std),
 ])
 
-tfms ={"train": train_tfms, "valid":val_tfms}
-
- 
+tfms = {"train": train_tfms, "valid":val_tfms}
 
 class ImageModel:
-    def __init__(self, data_path=".", tfms=tfms, model_name="resnet10t", device="cuda"):
+    def __init__(self, model, data_path=".", tfms=tfms, device="cuda", bs=256, use_wandb=False):
         
         self.device = device
-        self.config = SimpleNamespace(model_name=model_name, device=device)
+        self.config = SimpleNamespace(device=device)
         
-        self.model = timm.create_model(model_name, pretrained=False, num_classes=10, in_chans=1).to(device)
+        self.model = model.to(device)
         
         self.train_ds = tv.datasets.FashionMNIST(data_path, download=True, 
                                                  transform=tfms["train"])
         self.valid_ds = tv.datasets.FashionMNIST(data_path, download=True, train=False, 
                                                  transform=tfms["valid"])
         
-        self.train_acc = Accuracy(task="multiclass", num_classes=10).to(device)
-        self.valid_acc = Accuracy(task="multiclass", num_classes=10).to(device)
+        self.train_acc = MulticlassAccuracy(device=device)
+        self.valid_acc = MulticlassAccuracy(device=device)
+        self.loss = Mean()
         
         self.do_validation = True
         
-        self.dataloaders()
-                 
+        self.dataloaders(bs=bs)
+        self.config.tfms = tfms
         
+        self.use_wandb = use_wandb
+        
+        # get validation data reference
+        if use_wandb:
+            self.preds_logger = PredsLogger(ds=self.valid_ds) 
     
-    def dataloaders(self, bs=256, num_workers=8):
+    @classmethod
+    def from_timm(cls, model_name, data_path=".", tfms=tfms, device="cuda", bs=256 ):
+        model = timm.create_model(model_name, pretrained=False, num_classes=10, in_chans=1)
+        image_model = cls(model, data_path, tfms, device, bs)
+        image_model.config.model_name = model_name
+        return image_model
+            
+    def dataloaders(self, bs=128, num_workers=8):
         self.config.bs = bs
         self.num_workers = num_workers
         self.train_dataloader = DataLoader(self.train_ds, batch_size=bs, shuffle=True, 
                                    pin_memory=True, num_workers=num_workers)
         self.valid_dataloader = DataLoader(self.valid_ds, batch_size=bs*2, shuffle=False, 
                                    num_workers=num_workers)
-
-    def compile(self, epochs=5, lr=2e-3, wd=0.01, num_workers=8):
+    
+    def log(self, d):
+        if self.use_wandb and (wandb.run is not None):
+            wandb.log(d)
+    
+    def compile(self, epochs=5, lr=2e-3, wd=0.01):
         self.config.epochs = epochs
         self.config.lr = lr
         self.config.wd = wd
         
         self.optim = AdamW(self.model.parameters(), weight_decay=wd)
         self.loss_func = nn.CrossEntropyLoss()
-        self.schedule = OneCycleLR(self.optim, max_lr=lr, 
-                                   steps_per_epoch=len(self.train_dataloader), 
-                                   epochs=epochs)
+        self.schedule = OneCycleLR(self.optim, 
+                                   max_lr=lr, 
+                                   total_steps=epochs*len(self.train_dataloader))
     
-    def reset(self):
+    def reset_metrics(self):
         self.train_acc.reset()
         self.valid_acc.reset()
+        self.loss.reset()
         
     def train_step(self, loss):
         self.optim.zero_grad()
@@ -133,8 +155,7 @@ class ImageModel:
         self.schedule.step()
         return loss
         
-    def one_epoch(self, train=True, use_wandb=False):
-        avg_loss = 0.
+    def one_epoch(self, train=True):
         if train: 
             self.model.train()
             dl = self.train_dataloader
@@ -142,49 +163,59 @@ class ImageModel:
             self.model.eval()
             dl = self.valid_dataloader
         pbar = progress_bar(dl, leave=False)
+        preds = []
         for i, b in enumerate(pbar):
             with (torch.inference_mode() if not train else torch.enable_grad()):
                 images, labels = to_device(b, self.device)
-                with torch.autocast("cuda"):
-                    preds = self.model(images)
-                    loss = self.loss_func(preds, labels)
-                avg_loss += loss
+                # with torch.autocast("cuda"):
+                preds_b = self.model(images)
+                loss = self.loss_func(preds_b, labels)
+                self.loss.update(loss.detach().cpu(), weight=len(images))
+                preds.append(preds_b)
                 if train:
                     self.train_step(loss)
-                    acc = self.train_acc(preds, labels)
-                    if use_wandb: 
-                        wandb.log({"train_loss": loss.item(),
-                                   "train_acc": acc,
-                                   "learning_rate": self.schedule.get_last_lr()[0]})
+                    acc = self.train_acc.update(preds_b, labels)
+                    self.log({"train_loss": loss.item(),
+                              "train_acc": acc.compute(),
+                              "learning_rate": self.schedule.get_last_lr()[0]})
                 else:
-                    acc = self.valid_acc(preds, labels)
-            pbar.comment = f"train_loss={loss.item():2.3f}, train_acc={acc:2.3f}"      
+                    acc = self.valid_acc.update(preds_b, labels)
+            pbar.comment = f"train_loss={loss.item():2.3f}, train_acc={acc.compute():2.3f}"      
             
-        return avg_loss.mean().item(), acc
+        return torch.cat(preds, dim=0), self.loss.compute()
     
+    def log_preds(self, preds):
+        if self.use_wandb:
+            print("Logging model predictions on validation data")
+            preds, _ = self.get_model_preds()
+            self.preds_logger.log(preds=preds)
+    
+    def get_model_preds(self, with_inputs=False):
+        preds, loss = self.one_epoch(train=False)
+        if with_inputs:
+            images, labels = self.get_data_tensors()
+            return images, labels, preds, loss
+        else:
+            return preds, loss
+            
     def print_metrics(self, epoch, train_loss, val_loss):
-        print(f"epoch: {epoch:3}, train_loss: {train_loss:10.2f}, train_acc: {self.train_acc.compute():3.2f}   ||   val_loss: {val_loss:10.2f}, val_acc: {self.valid_acc.compute():3.2f}")
+        print(f"epoch: {epoch:3}, train_loss: {train_loss:10.3f}, train_acc: {self.train_acc.compute():3.3f}   ||   val_loss: {val_loss:10.3f}, val_acc: {self.valid_acc.compute():3.3f}")
     
-    def fit(self, use_wandb=False):
-        if use_wandb:
-            run = wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY, config=self.config)
-            
+    def fit(self, log_preds=False):         
         for epoch in progress_bar(range(self.config.epochs), total=self.config.epochs, leave=True):
-            train_loss, _ = self.one_epoch(train=True, use_wandb=use_wandb)
+            _, train_loss = self.one_epoch(train=True)
             
-            if use_wandb:
-                wandb.log({"epoch":epoch+1})
+            self.log({"epoch":epoch})
                 
             ## validation
             if self.do_validation:
-                val_loss, _ = self.one_epoch(train=False, use_wandb=use_wandb)
-                if use_wandb:
-                    wandb.log({"val_loss": val_loss,
-                               "val_acc": self.valid_acc.compute()})
+                _, val_loss = self.one_epoch(train=False)
+                self.log({"val_loss": val_loss,
+                          "val_acc": self.valid_acc.compute()})
             self.print_metrics(epoch, train_loss, val_loss)
-            self.reset()
-        if use_wandb:
-            wandb.finish()
+            self.reset_metrics()
+        if log_preds:
+            self.log_preds(preds)
 
             
 if __name__=="__main__":
@@ -192,6 +223,21 @@ if __name__=="__main__":
     
     set_seed(config.seed)
     
-    model = ImageModel(model_name=config.model_name)
-    model.compile(epochs=20, lr=config.lr, wd=config.wd)
-    model.fit(use_wandb=True)
+    if config.model_name == "jeremy":
+        print("Using custom Jeremy's Model")
+        from jeremy_resnet import resnet
+        
+        leak = 0.1
+        sub = 0.4
+        
+        model = ImageModel(resnet(leak, sub), bs=512)
+        model.config.model_name = {"model_name":"jeremy", "leak":leak, "sub":sub}
+    else:
+        model = ImageModel.from_timm(model_name=config.model_name)
+    
+    
+    model.compile(epochs=config.epochs, lr=config.lr, wd=config.wd)
+    
+    # train
+    with wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY, config=model.config):
+        model.fit()
