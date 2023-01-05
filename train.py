@@ -1,9 +1,11 @@
 import random, argparse
 from types import SimpleNamespace
+from contextlib import nullcontext
 
 import wandb
 import timm
 import torchvision as tv
+from torchvision.datasets import FashionMNIST
 import torchvision.transforms as T
 
 from fastprogress import progress_bar
@@ -13,60 +15,25 @@ from torcheval.metrics import MulticlassAccuracy, Mean
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR, LinearLR
 from torch.utils.data import DataLoader
 
+from utils import set_seed, to_device, model_size, parse_args
 from preds_logger import PredsLogger
 
 
-def set_seed(s, reproducible=False):
-    "Set random seed for `random`, `torch`, and `numpy` (where available)"
-    try: torch.manual_seed(s)
-    except NameError: pass
-    try: torch.cuda.manual_seed_all(s)
-    except NameError: pass
-    try: np.random.seed(s%(2**32-1))
-    except NameError: pass
-    random.seed(s)
-    if reproducible:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-def to_device(t, device):
-    if isinstance(t, (tuple, list)):
-        return [_t.to(device) for _t in t]
-    elif isinstance(t, torch.Tensor):
-        return t.to(device)
-    else:
-        raise("Not a Tensor or list of Tensors")
-    return t    
-        
 WANDB_PROJECT = "fmnist_bench"
 WANDB_ENTITY = "capecape"
         
 config = SimpleNamespace(
-    epochs=20, 
+    epochs=5, 
     model_name="resnet10t", 
     bs=512,
     device="cuda",
     seed=42,
-    lr=1e-2,
+    lr=1e-3,
+    use_wandb=True,
     wd=0.)
-
-def parse_args(config):
-    parser = argparse.ArgumentParser(description='Run training baseline')
-    parser.add_argument('--model_name', type=str, default=config.model_name, help='A model from timm')
-    parser.add_argument('--epochs', type=int, default=config.epochs, help='number of epochs')
-    parser.add_argument('--device', type=str, default=config.device, help='device')
-    parser.add_argument('--seed', type=int, default=config.seed, help='random seed')
-    parser.add_argument('--bs', type=int, default=config.bs, help='batch size')
-    parser.add_argument('--lr', type=float, default=config.lr, help='learning_rate')
-    args = vars(parser.parse_args())
-    
-    # update config with parsed args
-    for k, v in args.items():
-        setattr(config, k, v)
-
         
 mean, std = (0.28, 0.35)
         
@@ -85,17 +52,17 @@ val_tfms = T.Compose([
 
 tfms = {"train": train_tfms, "valid":val_tfms}
 
-class ImageModel:
-    def __init__(self, model, data_path=".", tfms=tfms, device="cuda", bs=256, use_wandb=False):
+class FashionTrainer:
+    def __init__(self, model, data_path=".", tfms=tfms, device="cuda", bs=256):
         
         self.device = device
         self.config = SimpleNamespace(device=device)
         
         self.model = model.to(device)
         
-        self.train_ds = tv.datasets.FashionMNIST(data_path, download=True, 
+        self.train_ds = FashionMNIST(data_path, download=True, 
                                                  transform=tfms["train"])
-        self.valid_ds = tv.datasets.FashionMNIST(data_path, download=True, train=False, 
+        self.valid_ds = FashionMNIST(data_path, download=True, train=False, 
                                                  transform=tfms["valid"])
         
         self.train_acc = MulticlassAccuracy(device=device)
@@ -105,23 +72,17 @@ class ImageModel:
         self.do_validation = True
         
         self.dataloaders(bs=bs)
-        self.config.tfms = tfms
-        
-        self.use_wandb = use_wandb
-        
-        # get validation data reference
-        if use_wandb:
-            self.preds_logger = PredsLogger(ds=self.valid_ds) 
+        self.tfms = tfms
+
     
     @classmethod
-    def from_timm(cls, model_name, data_path=".", tfms=tfms, device="cuda", bs=256 ):
+    def from_timm(cls, model_name, data_path=".", tfms=tfms, device="cuda", bs=256):
         model = timm.create_model(model_name, pretrained=False, num_classes=10, in_chans=1)
         image_model = cls(model, data_path, tfms, device, bs)
-        image_model.config.model_name = model_name
+        image_model.model_name = model_name
         return image_model
             
     def dataloaders(self, bs=128, num_workers=8):
-        self.config.bs = bs
         self.num_workers = num_workers
         self.train_dataloader = DataLoader(self.train_ds, batch_size=bs, shuffle=True, 
                                    pin_memory=True, num_workers=num_workers)
@@ -129,20 +90,18 @@ class ImageModel:
                                    num_workers=num_workers)
     
     def log(self, d):
-        if self.use_wandb and (wandb.run is not None):
+        if wandb.run is not None:
             wandb.log(d)
     
     def compile(self, epochs=5, lr=2e-3, wd=0.01):
-        self.config.epochs = epochs
-        self.config.lr = lr
-        self.config.wd = wd
-        
-        self.optim = AdamW(self.model.parameters(), weight_decay=wd)
+        self.epochs = epochs
+        self.optim = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
         self.loss_func = nn.CrossEntropyLoss()
         self.schedule = OneCycleLR(self.optim, 
                                    max_lr=lr, 
+                                   pct_start=0.1,
                                    total_steps=epochs*len(self.train_dataloader))
-    
+
     def reset_metrics(self):
         self.train_acc.reset()
         self.valid_acc.reset()
@@ -174,21 +133,21 @@ class ImageModel:
                 preds.append(preds_b)
                 if train:
                     self.train_step(loss)
-                    acc = self.train_acc.update(preds_b, labels)
+                    self.train_acc.update(preds_b, labels)
                     self.log({"train_loss": loss.item(),
-                              "train_acc": acc.compute(),
                               "learning_rate": self.schedule.get_last_lr()[0]})
                 else:
                     acc = self.valid_acc.update(preds_b, labels)
-            pbar.comment = f"train_loss={loss.item():2.3f}, train_acc={acc.compute():2.3f}"      
+            pbar.comment = f"train_loss={loss.item():2.3f}, train_acc={self.train_acc.compute():2.3f}"      
             
         return torch.cat(preds, dim=0), self.loss.compute()
     
-    def log_preds(self, preds):
-        if self.use_wandb:
+    def log_preds(self):
+        if wandb.run is not None:
+            preds_logger = PredsLogger(ds=self.valid_ds) 
             print("Logging model predictions on validation data")
             preds, _ = self.get_model_preds()
-            self.preds_logger.log(preds=preds)
+            preds_logger.log(preds=preds)
     
     def get_model_preds(self, with_inputs=False):
         preds, loss = self.one_epoch(train=False)
@@ -202,10 +161,10 @@ class ImageModel:
         print(f"epoch: {epoch:3}, train_loss: {train_loss:10.3f}, train_acc: {self.train_acc.compute():3.3f}   ||   val_loss: {val_loss:10.3f}, val_acc: {self.valid_acc.compute():3.3f}")
     
     def fit(self, log_preds=False):         
-        for epoch in progress_bar(range(self.config.epochs), total=self.config.epochs, leave=True):
+        for epoch in progress_bar(range(self.epochs), total=self.epochs, leave=True):
             _, train_loss = self.one_epoch(train=True)
             
-            self.log({"epoch":epoch})
+            self.log({"train_acc": self.train_acc.compute(), "epoch":epoch})
                 
             ## validation
             if self.do_validation:
@@ -215,29 +174,21 @@ class ImageModel:
             self.print_metrics(epoch, train_loss, val_loss)
             self.reset_metrics()
         if log_preds:
-            self.log_preds(preds)
+            self.log_preds()
+
+
+def main(config):
+    set_seed(config.seed)
+    
+    trainer = FashionTrainer.from_timm(model_name=config.model_name, bs=config.bs, tfms=tfms)
+    
+    trainer.compile(epochs=config.epochs, lr=config.lr, wd=config.wd)
+    
+    # train
+    with wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY, config=config) if config.use_wandb else nullcontext():
+        trainer.fit()
 
             
 if __name__=="__main__":
     parse_args(config)
-    
-    set_seed(config.seed)
-    
-    if config.model_name == "jeremy":
-        print("Using custom Jeremy's Model")
-        from jeremy_resnet import resnet
-        
-        leak = 0.1
-        sub = 0.4
-        
-        model = ImageModel(resnet(leak, sub), bs=512)
-        model.config.model_name = {"model_name":"jeremy", "leak":leak, "sub":sub}
-    else:
-        model = ImageModel.from_timm(model_name=config.model_name)
-    
-    
-    model.compile(epochs=config.epochs, lr=config.lr, wd=config.wd)
-    
-    # train
-    with wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY, config=model.config):
-        model.fit()
+    main(config)
