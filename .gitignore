@@ -130,4 +130,5 @@ dmypy.json
 
 # Personal
 wandb/
+artifacts/
 FashionMNIST
