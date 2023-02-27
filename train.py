@@ -22,7 +22,7 @@ from utils import set_seed, to_device, model_size, parse_args
 from preds_logger import PredsLogger
 
 
-WANDB_PROJECT = "fmnist_bench"
+WANDB_PROJECT = "fmnist_pt"
 WANDB_ENTITY = "capecape"
         
 config = SimpleNamespace(
@@ -32,7 +32,8 @@ config = SimpleNamespace(
     device="cuda",
     seed=42,
     lr=1e-3,
-    wd=0.)
+    wd=0.
+)
         
 mean, std = (0.28, 0.35)
         

@@ -1,6 +1,6 @@
 program: train.py
-entity: fastai
-project: fmnist
+entity: capecape
+project: fmnist_pt
 method: random
 parameters:
     lr:
