@@ -32,7 +32,6 @@ config = SimpleNamespace(
     device="cuda",
     seed=42,
     lr=1e-3,
-    use_wandb=True,
     wd=0.)
         
 mean, std = (0.28, 0.35)
@@ -160,7 +159,8 @@ class FashionTrainer:
     def print_metrics(self, epoch, train_loss, val_loss):
         print(f"epoch: {epoch:3}, train_loss: {train_loss:10.3f}, train_acc: {self.train_acc.compute():3.3f}   ||   val_loss: {val_loss:10.3f}, val_acc: {self.valid_acc.compute():3.3f}")
     
-    def fit(self, log_preds=False):         
+    def fit(self, log_preds=False):      
+        self.log({"model_size":model_size(self.model)})   
         for epoch in progress_bar(range(self.epochs), total=self.epochs, leave=True):
             _, train_loss = self.one_epoch(train=True)
             
@@ -185,7 +185,7 @@ def main(config):
     trainer.compile(epochs=config.epochs, lr=config.lr, wd=config.wd)
     
     # train
-    with wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY, config=config) if config.use_wandb else nullcontext():
+    with wandb.init(project=WANDB_PROJECT, entity=WANDB_ENTITY, config=config):
         trainer.fit()
 
             
