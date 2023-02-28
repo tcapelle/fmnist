@@ -1,12 +1,9 @@
-import random, argparse
 from types import SimpleNamespace
-from contextlib import nullcontext
 
 import wandb
 import timm
-import torchvision as tv
-from torchvision.datasets import FashionMNIST
 import torchvision.transforms as T
+from torchvision.datasets import FashionMNIST
 
 from fastprogress import progress_bar
 
@@ -15,7 +12,7 @@ from torcheval.metrics import MulticlassAccuracy, Mean
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR, LinearLR
+from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 
 from utils import set_seed, to_device, model_size, parse_args
@@ -55,9 +52,7 @@ config.tfms = {"train": train_tfms, "valid":val_tfms}
 class FashionTrainer:
     def __init__(self, model, data_path=".", tfms=None, device="cuda", bs=256):
         
-        self.device = device
-        self.config = SimpleNamespace(device=device)
-        
+        self.device = device        
         self.model = model.to(device)
         
         self.train_ds = FashionMNIST(data_path, download=True, 
