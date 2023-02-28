@@ -1,6 +1,5 @@
 torch
 torcheval
-fastcore
-fastpreogress
+fastprogress
 wandb
 timm

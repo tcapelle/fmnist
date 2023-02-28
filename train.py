@@ -50,10 +50,10 @@ val_tfms = T.Compose([
     T.Normalize(mean, std),
 ])
 
-tfms = {"train": train_tfms, "valid":val_tfms}
+config.tfms = {"train": train_tfms, "valid":val_tfms}
 
 class FashionTrainer:
-    def __init__(self, model, data_path=".", tfms=tfms, device="cuda", bs=256):
+    def __init__(self, model, data_path=".", tfms=None, device="cuda", bs=256):
         
         self.device = device
         self.config = SimpleNamespace(device=device)
@@ -76,24 +76,20 @@ class FashionTrainer:
 
     
     @classmethod
-    def from_timm(cls, model_name, data_path=".", tfms=tfms, device="cuda", bs=256):
+    def from_timm(cls, model_name, data_path=".", tfms=None, device="cuda", bs=256):
         model = timm.create_model(model_name, pretrained=False, num_classes=10, in_chans=1)
         image_model = cls(model, data_path, tfms, device, bs)
         image_model.model_name = model_name
         return image_model
             
     def dataloaders(self, bs=128, num_workers=8):
-        self.num_workers = num_workers
         self.train_dataloader = DataLoader(self.train_ds, batch_size=bs, shuffle=True, 
                                    pin_memory=True, num_workers=num_workers)
         self.valid_dataloader = DataLoader(self.valid_ds, batch_size=bs*2, shuffle=False, 
                                    num_workers=num_workers)
     
-    def log(self, d):
-        if wandb.run is not None:
-            wandb.log(d)
-    
     def compile(self, epochs=5, lr=2e-3, wd=0.01):
+        "Keras style compile method"
         self.epochs = epochs
         self.optim = AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
         self.loss_func = nn.CrossEntropyLoss()
@@ -123,10 +119,9 @@ class FashionTrainer:
             dl = self.valid_dataloader
         pbar = progress_bar(dl, leave=False)
         preds = []
-        for i, b in enumerate(pbar):
+        for b in pbar:
             with (torch.inference_mode() if not train else torch.enable_grad()):
                 images, labels = to_device(b, self.device)
-                # with torch.autocast("cuda"):
                 preds_b = self.model(images)
                 loss = self.loss_func(preds_b, labels)
                 self.loss.update(loss.detach().cpu(), weight=len(images))
@@ -134,10 +129,10 @@ class FashionTrainer:
                 if train:
                     self.train_step(loss)
                     self.train_acc.update(preds_b, labels)
-                    self.log({"train_loss": loss.item(),
+                    wandb.log({"train_loss": loss.item(),
                               "learning_rate": self.schedule.get_last_lr()[0]})
                 else:
-                    acc = self.valid_acc.update(preds_b, labels)
+                    self.valid_acc.update(preds_b, labels)
             pbar.comment = f"train_loss={loss.item():2.3f}, train_acc={self.train_acc.compute():2.3f}"      
             
         return torch.cat(preds, dim=0), self.loss.compute()
@@ -165,13 +160,12 @@ class FashionTrainer:
         for epoch in progress_bar(range(self.epochs), total=self.epochs, leave=True):
             _, train_loss = self.one_epoch(train=True)
             
-            self.log({"train_acc": self.train_acc.compute(), "epoch":epoch})
+            wandb.log({"train_acc": self.train_acc.compute(), "epoch":epoch})
                 
             ## validation
             if self.do_validation:
                 _, val_loss = self.one_epoch(train=False)
-                self.log({"val_loss": val_loss,
-                          "val_acc": self.valid_acc.compute()})
+                wandb.log({"val_loss": val_loss, "val_acc": self.valid_acc.compute()})
             self.print_metrics(epoch, train_loss, val_loss)
             self.reset_metrics()
         if log_preds:
@@ -181,7 +175,7 @@ class FashionTrainer:
 def main(config):
     set_seed(config.seed)
     
-    trainer = FashionTrainer.from_timm(model_name=config.model_name, bs=config.bs, tfms=tfms)
+    trainer = FashionTrainer.from_timm(model_name=config.model_name, bs=config.bs, tfms=config.tfms)
     
     trainer.compile(epochs=config.epochs, lr=config.lr, wd=config.wd)
     
